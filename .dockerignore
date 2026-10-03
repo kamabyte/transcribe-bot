@@ -1,0 +1,13 @@
+# Секреты в образ не попадают никогда: переменные задаются в Dokploy.
+.env
+.env.*
+!.env.example
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.git
+.github
+.idea
+.DS_Store
+DEPLOY.md

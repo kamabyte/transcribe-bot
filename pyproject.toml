@@ -1,0 +1,25 @@
+[project]
+name = "transcribe-bot"
+version = "0.1.0"
+description = "Telegram бот для транскрибации голосовых сообщений (Groq/OpenAI)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram>=3.24",
+    "openai>=1.60",
+    "pydantic-settings>=2.5",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+transcribe-bot = "bot:run"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+include = ["bot.py", "config.py", "providers"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
