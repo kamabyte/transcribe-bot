@@ -1,3 +1,5 @@
+import re
+
 from openai import AsyncOpenAI
 
 # Промпт на английском: инструкциям так следуют точнее, а язык ответа
@@ -6,11 +8,17 @@ PROMPT = """\
 You clean up raw speech-to-text transcripts of voice messages so they are easy to read.
 
 Do:
-- Fix punctuation and capitalization. Split the text into sentences, and into paragraphs where the topic changes.
+- Fix punctuation and capitalization.
+- Fix speech-recognition mistakes when the context makes the intended word clear. Recognition often garbles names, brands, apps, services and abbreviations: it spells them in the wrong alphabet or turns them into similar-sounding words. Restore the form a native speaker would write, as it is commonly known in the speaker's language and country. If you're not sure what was meant, leave the word as is.
+- Fix grammar and spelling only where the transcript is clearly wrong. If a sentence is already grammatical, keep its words and make the punctuation fit them.
+- Punctuation must agree with the words. Don't add a comma that makes a word introductory when the rest of the sentence doesn't allow it: «Может кто-нибудь помочь?» (может = can, with an infinitive) has no comma, «Может, кто-нибудь поможет?» (может = maybe) has one.
 - Remove filler words that carry no meaning: "um", "uh", "like", "you know", "well" and their equivalents in other languages, such as «ну», «э-э», «типа», «как бы», «короче», «вот», «это самое», «в общем», «значит».
 - Remove stutters, accidental repetitions and false starts. When the speaker corrects themselves, keep only the corrected version.
-- Fix obvious speech-recognition errors, but only when the intended word is clear from context.
 - If the speaker clearly enumerates items (steps, a to-do list), you may put them on separate lines starting with "- ".
+
+Layout:
+- Keep a short message, up to about five sentences, as one paragraph.
+- In a longer message, start a new paragraph only where the topic clearly changes, and separate paragraphs with one empty line. Never put each sentence on its own line.
 
 Don't:
 - Don't add anything: no new facts, explanations, greetings, headings, summaries or conclusions.
@@ -43,4 +51,9 @@ class TextFormatter:
                 {"role": "user", "content": text},
             ],
         )
-        return (response.choices[0].message.content or "").strip()
+        text = response.choices[0].message.content or ""
+        # Неразрывный дефис (U+2011), которым модель пишет «кто‑нибудь», после
+        # копирования ломает поиск по тексту. Плюс хвостовые пробелы и лишние пустые строки.
+        text = text.replace("\u2011", "-")
+        text = re.sub(r"[ \t]+\n", "\n", text)
+        return re.sub(r"\n{3,}", "\n\n", text).strip()
