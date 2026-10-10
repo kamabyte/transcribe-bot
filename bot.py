@@ -2,6 +2,8 @@ import asyncio
 import html
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from dataclasses import dataclass
 from io import BytesIO
 from typing import Any
 
@@ -30,17 +32,34 @@ provider = build_provider()
 formatter = build_formatter()
 
 TELEGRAM_LIMIT = 4096
+BLOCK_SIZE = TELEGRAM_LIMIT - len("<pre></pre>")
 
-# callback_data кнопки «Отформатировать». Короткая расшифровка целиком лежит
-# в сообщении с кнопкой, длинная — нет, её текст берём из long_transcripts.
+# callback_data кнопок под расшифровкой. FORMAT_LONG — у расшифровки из
+# нескольких сообщений: после перезапуска бота её текст не восстановить,
+# а короткая лежит в сообщении с кнопкой целиком.
 FORMAT = "format"
 FORMAT_LONG = "format:long"
+ORIGINAL = "original"
+BUSY = "busy"
 
-# Длинная расшифровка приходит несколькими сообщениями, а прочитать прошлые
-# сообщения бот не может. Поэтому полный текст держим в памяти по ключу
-# (chat_id, message_id) сообщения с кнопкой. Перезапуск бота его стирает.
-long_transcripts: dict[tuple[int, int], str] = {}
-LONG_TRANSCRIPTS_LIMIT = 100
+LOST = "Текст потерян после перезапуска бота — пришли голосовое ещё раз."
+
+
+@dataclass
+class Transcript:
+    """Расшифровка и сообщения, в которых она показана (кнопка — на последнем)."""
+
+    original: str
+    message_ids: list[int]
+    formatted: str | None = None
+
+
+# Оригинал и отформатированный текст показываются в одних и тех же сообщениях
+# по очереди, а прочитать прошлые сообщения бот не может. Поэтому расшифровки
+# держим в памяти по ключу (chat_id, message_id) сообщения с кнопкой.
+# Перезапуск бота их стирает.
+transcripts: dict[tuple[int, int], Transcript] = {}
+TRANSCRIPTS_LIMIT = 200
 
 
 @dp.message.outer_middleware()
@@ -71,46 +90,70 @@ async def check_access(
     return None
 
 
-def to_blocks(text: str) -> list[str]:
-    """Бьёт текст на код-блоки по лимиту сообщения Telegram."""
+def to_blocks(text: str, count: int = 1) -> list[str]:
+    """Бьёт текст поровну на код-блоки: не меньше count и не длиннее лимита Telegram.
+
+    Поровну — чтобы отформатированный текст, обычно более короткий, занял
+    те же сообщения, что и оригинал.
+    """
     # Единый механизм копирования для любой длины: код-блок <pre> со
     # встроенной иконкой копирования. Нативную кнопку copy_text не используем —
     # у неё лимит Telegram в 256 символов, поэтому единого стиля с ней не выйдет.
-    margin = len("<pre></pre>")
-    size = TELEGRAM_LIMIT - margin
-    chunks = [text[i : i + size] for i in range(0, len(text), size)]
-    return [f"<pre>{html.escape(chunk)}</pre>" for chunk in chunks]
+    count = max(count, -(-len(text) // BLOCK_SIZE))
+    bounds = [len(text) * i // count for i in range(count + 1)]
+    return [f"<pre>{html.escape(text[a:b])}</pre>" for a, b in zip(bounds, bounds[1:])]
 
 
-async def send_blocks(
-    status: Message,
-    blocks: list[str],
-    reply_markup: InlineKeyboardMarkup | None = None,
-) -> Message:
-    """Пишет первый блок вместо статуса, остальные — новыми сообщениями.
+def keyboard(text: str, data: str) -> InlineKeyboardMarkup:
+    """Кнопка под расшифровкой."""
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)]])
 
-    Кнопки цепляются к последнему сообщению, его и возвращает.
+
+def format_keyboard(is_long: bool, text: str = "✨ Отформатировать") -> InlineKeyboardMarkup:
+    return keyboard(text, FORMAT_LONG if is_long else FORMAT)
+
+
+def remember(chat_id: int, t: Transcript) -> None:
+    transcripts[(chat_id, t.message_ids[-1])] = t
+    if len(transcripts) > TRANSCRIPTS_LIMIT:
+        # dict хранит порядок вставки: первый ключ — самая старая запись.
+        del transcripts[next(iter(transcripts))]
+
+
+async def show(bot: Bot, chat_id: int, t: Transcript, text: str, reply_markup: InlineKeyboardMarkup) -> None:
+    """Показывает text в сообщениях расшифровки, кнопку — на последнем.
+
+    Если текст не влезает в прежние сообщения, недостающие дописываются в конец чата.
     """
-    last = len(blocks) - 1
-    await status.edit_text(blocks[0], reply_markup=reply_markup if last == 0 else None)
-    sent = status
-    for i, block in enumerate(blocks[1:], start=1):
-        sent = await status.answer(block, reply_markup=reply_markup if i == last else None)
-    return sent
+    blocks = to_blocks(text, len(t.message_ids))
+    for i, block in enumerate(blocks):
+        markup = reply_markup if i == len(blocks) - 1 else None
+        if i == len(t.message_ids):
+            sent = await bot.send_message(chat_id, block, reply_markup=markup)
+            t.message_ids.append(sent.message_id)
+            continue
+        try:
+            await bot.edit_message_text(block, chat_id=chat_id, message_id=t.message_ids[i], reply_markup=markup)
+        except TelegramBadRequest as e:
+            # Этот кусок уже показан ровно таким — не ошибка
+            if "message is not modified" not in e.message:
+                raise
+    remember(chat_id, t)
 
 
-def transcript_keyboard(is_long: bool) -> InlineKeyboardMarkup:
-    """Кнопки под расшифровкой. Новые действия добавляются сюда."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✨ Отформатировать",
-                    callback_data=FORMAT_LONG if is_long else FORMAT,
-                )
-            ]
-        ]
-    )
+async def callback_message(callback: CallbackQuery) -> Message | None:
+    """Сообщение с нажатой кнопкой; None — если боту оно уже недоступно."""
+    if isinstance(callback.message, Message):
+        return callback.message
+    await callback.answer("Сообщение недоступно — пришли голосовое ещё раз.", show_alert=True)
+    return None
+
+
+async def drop_buttons(callback: CallbackQuery, message: Message) -> None:
+    """Без расшифровки в памяти кнопка уже не сработает — убираем её."""
+    await callback.answer(LOST, show_alert=True)
+    with suppress(TelegramBadRequest):
+        await message.edit_reply_markup(reply_markup=None)
 
 
 @dp.message(CommandStart())
@@ -149,57 +192,76 @@ async def on_voice(message: Message, bot: Bot) -> None:
         await status.edit_text("🤔 Не удалось распознать речь — тишина или шум?")
         return
 
-    blocks = to_blocks(text)
-    is_long = len(blocks) > 1
-    sent = await send_blocks(status, blocks, transcript_keyboard(is_long))
-    if is_long:
-        long_transcripts[(sent.chat.id, sent.message_id)] = text
-        if len(long_transcripts) > LONG_TRANSCRIPTS_LIMIT:
-            # dict хранит порядок вставки: первый ключ — самая старая запись.
-            del long_transcripts[next(iter(long_transcripts))]
+    # Статус становится первым сообщением расшифровки
+    t = Transcript(text, [status.message_id])
+    await show(bot, message.chat.id, t, text, format_keyboard(len(text) > BLOCK_SIZE))
 
 
 @dp.callback_query(F.data.in_({FORMAT, FORMAT_LONG}))
-async def on_format(callback: CallbackQuery) -> None:
-    message = callback.message
-    if not isinstance(message, Message):
-        await callback.answer("Сообщение недоступно — пришли голосовое ещё раз.", show_alert=True)
+async def on_format(callback: CallbackQuery, bot: Bot) -> None:
+    message = await callback_message(callback)
+    if message is None:
+        return
+    t = transcripts.get((message.chat.id, message.message_id))
+    if t is None and callback.data == FORMAT and message.text:
+        # Бот перезапускался, но короткая расшифровка целиком в сообщении
+        t = Transcript(message.text, [message.message_id])
+        remember(message.chat.id, t)
+    if t is None:
+        await drop_buttons(callback, message)
         return
 
-    if callback.data == FORMAT_LONG:
-        text = long_transcripts.get((message.chat.id, message.message_id))
-    else:
-        text = message.text
-    if not text:
-        await callback.answer(
-            "Исходный текст потерян после перезапуска бота — пришли голосовое ещё раз.",
-            show_alert=True,
-        )
-        return
-
-    # Снимаем кнопку до запроса к модели, чтобы повторное нажатие не запустило
-    # второй. При двойном нажатии второй обработчик снять её уже не сможет.
-    markup = message.reply_markup
-    try:
-        await message.edit_reply_markup(reply_markup=None)
-    except TelegramBadRequest:
+    if t.formatted is None:
+        # «⏳» — и индикатор, и защита от двойного нажатия: второй обработчик
+        # поставить ту же кнопку уже не сможет.
+        try:
+            await message.edit_reply_markup(reply_markup=keyboard("⏳ Форматирую…", BUSY))
+        except TelegramBadRequest:
+            await callback.answer()
+            return
         await callback.answer()
+
+        try:
+            formatted = await formatter.format(t.original)
+        except Exception:  # noqa: BLE001 — пользователю хватит кнопки «ещё раз»
+            logger.exception("Ошибка форматирования")
+            formatted = ""
+        # Пустой ответ — сбой. Заодно в каждое сообщение нужен хотя бы символ.
+        if len(formatted) < len(t.message_ids):
+            await message.edit_reply_markup(
+                reply_markup=format_keyboard(len(t.message_ids) > 1, "⚠️ Не вышло — ещё раз")
+            )
+            return
+        t.formatted = formatted
+    else:
+        await callback.answer()
+
+    await show(bot, message.chat.id, t, t.formatted, keyboard("↩️ Оригинал", ORIGINAL))
+
+
+@dp.callback_query(F.data == ORIGINAL)
+async def on_original(callback: CallbackQuery, bot: Bot) -> None:
+    message = await callback_message(callback)
+    if message is None:
+        return
+    t = transcripts.get((message.chat.id, message.message_id))
+    if t is None:
+        await drop_buttons(callback, message)
         return
     await callback.answer()
+    await show(bot, message.chat.id, t, t.original, format_keyboard(len(t.message_ids) > 1))
 
-    status = await message.reply("✨ Форматирую…")
-    try:
-        formatted = await formatter.format(text)
-    except Exception:  # noqa: BLE001 — показываем пользователю общую ошибку
-        logger.exception("Ошибка форматирования")
-        formatted = ""
 
-    if not formatted:
-        await status.edit_text("⚠️ Не удалось отформатировать текст. Попробуй ещё раз.")
-        await message.edit_reply_markup(reply_markup=markup)
+@dp.callback_query(F.data == BUSY)
+async def on_busy(callback: CallbackQuery) -> None:
+    message = await callback_message(callback)
+    if message is None:
         return
-
-    await send_blocks(status, to_blocks(formatted))
+    if (message.chat.id, message.message_id) not in transcripts:
+        # Бот перезапустился посреди форматирования
+        await drop_buttons(callback, message)
+        return
+    await callback.answer("⏳ Уже форматирую…")
 
 
 @dp.message()
@@ -214,7 +276,7 @@ async def main() -> None:
     )
     logger.info("Бот запущен. Провайдер: %s", provider.name)
     if settings.allowed_users:
-        logger.info("Доступ: %d пользователей из ALLOWED_USERS", len(settings.allowed_users))
+        logger.info("Доступ ограничен: ALLOWED_USERS (записей: %d)", len(settings.allowed_users))
     else:
         logger.warning("ALLOWED_USERS пуст — ботом может пользоваться любой")
     await dp.start_polling(bot)
