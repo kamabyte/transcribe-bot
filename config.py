@@ -17,5 +17,9 @@ class Settings(BaseSettings):
     # Принудительный язык (ISO-639-1). Пусто -> автоопределение моделью.
     language: str | None = None
 
+    # Модель для кнопки «Отформатировать». Пусто -> дефолтная для провайдера
+    # (см. providers/registry.py).
+    format_model: str | None = None
+
 
 settings = Settings()
