@@ -1,4 +1,7 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Annotated
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -20,6 +23,17 @@ class Settings(BaseSettings):
     # Модель для кнопки «Отформатировать». Пусто -> дефолтная для провайдера
     # (см. providers/registry.py).
     format_model: str | None = None
+
+    # Кто может пользоваться ботом: Telegram ID через запятую. Пусто -> все.
+    # Свой ID человек без доступа увидит в ответе бота.
+    allowed_users: Annotated[frozenset[int], NoDecode] = frozenset()
+
+    @field_validator("allowed_users", mode="before")
+    @classmethod
+    def _split_ids(cls, value: object) -> object:
+        if isinstance(value, str):
+            return {int(part) for part in value.replace(" ", "").split(",") if part}
+        return value
 
 
 settings = Settings()

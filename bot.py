@@ -1,14 +1,23 @@
 import asyncio
 import html
 import logging
+from collections.abc import Awaitable, Callable
 from io import BytesIO
+from typing import Any
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    TelegramObject,
+    User,
+)
 
 from config import settings
 from providers import build_formatter, build_provider
@@ -32,6 +41,34 @@ FORMAT_LONG = "format:long"
 # (chat_id, message_id) сообщения с кнопкой. Перезапуск бота его стирает.
 long_transcripts: dict[tuple[int, int], str] = {}
 LONG_TRANSCRIPTS_LIMIT = 100
+
+
+@dp.message.outer_middleware()
+@dp.callback_query.outer_middleware()
+async def check_access(
+    handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+    event: TelegramObject,
+    data: dict[str, Any],
+) -> Any:
+    """Пускает к хендлерам только пользователей из ALLOWED_USERS (пусто — всех).
+
+    Остальным бот отвечает их ID: владелец добавит его, если захочет дать доступ.
+    """
+    user: User | None = data.get("event_from_user")
+    if not settings.allowed_users or (user and user.id in settings.allowed_users):
+        return await handler(event, data)
+
+    if user is None:
+        return None
+    logger.info("Нет доступа: id=%s @%s", user.id, user.username)
+    if isinstance(event, Message):
+        await event.answer(
+            "🔒 Это личный бот.\n\n"
+            f"Твой Telegram ID: <code>{user.id}</code> — передай его владельцу, если нужен доступ."
+        )
+    elif isinstance(event, CallbackQuery):
+        await event.answer("🔒 Нет доступа", show_alert=True)
+    return None
 
 
 def to_blocks(text: str) -> list[str]:
@@ -176,6 +213,10 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     logger.info("Бот запущен. Провайдер: %s", provider.name)
+    if settings.allowed_users:
+        logger.info("Доступ: %d пользователей из ALLOWED_USERS", len(settings.allowed_users))
+    else:
+        logger.warning("ALLOWED_USERS пуст — ботом может пользоваться любой")
     await dp.start_polling(bot)
 
 

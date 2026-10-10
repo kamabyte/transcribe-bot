@@ -14,7 +14,7 @@
 |---|---|
 | Порты, домен | нет: long polling к `api.telegram.org` |
 | Тома | нет: аудио обрабатывается в памяти |
-| Переменные | `BOT_TOKEN`, `PROVIDER` (`groq`), `GROQ_API_KEY`; опционально `OPENAI_API_KEY`, `LANGUAGE`, `FORMAT_MODEL` — см. `.env.example` |
+| Переменные | `BOT_TOKEN`, `PROVIDER` (`groq`), `GROQ_API_KEY`, `ALLOWED_USERS` (иначе бот открыт всем); опционально `OPENAI_API_KEY`, `LANGUAGE`, `FORMAT_MODEL` — см. `.env.example` |
 | Ресурсы | 1 ядро и 512 МБ хватает с запасом |
 | Экземпляров | **ровно один**: два процесса на одном токене Telegram мешают друг другу (`Conflict: terminated by other getUpdates`) |
 
