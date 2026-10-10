@@ -78,6 +78,7 @@ transcribe-bot/
 ├── config.py               # настройки из .env
 ├── pyproject.toml          # зависимости и метаданные (uv)
 ├── DEPLOY.md               # деплой на сервер (Docker, Dokploy)
+├── deploy/dokploy/deploy.sh# выкатка в Dokploy через API
 ├── Dockerfile              # образ ghcr.io/kamabyte/transcribe-bot
 ├── .env.example
 └── providers/

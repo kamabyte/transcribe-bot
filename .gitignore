@@ -7,3 +7,6 @@ __pycache__/
 
 # Личное: рабочие заметки по установке — только локально
 private/
+
+# Установки Dokploy для deploy/dokploy/deploy.sh — адреса и имена ключей, только локально
+deploy/dokploy/targets/
